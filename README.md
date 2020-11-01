@@ -1,0 +1,2 @@
+# episim
+Epidemic modelling playground
