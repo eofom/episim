@@ -3,175 +3,300 @@
 #include <chrono>
 #include <vector>
 #include <array>
+#include <memory>
 
 #define OUTSTR(x) (std::string(#x": ") + std::to_string(x))
 
-class Simulator {
+class RandomGenerator {
 public:
-    enum class State {
-        kHealthy = 0,
-        kInIncubationPeriod,
-        kIll,
-        kImmune,
-        kDead
-    };
+    // singleton pattern
+    RandomGenerator(RandomGenerator const&) = delete;
+    RandomGenerator(RandomGenerator &&) = delete;
+    RandomGenerator operator=(RandomGenerator const&) = delete;
+    RandomGenerator operator=(RandomGenerator &&) = delete;
 
-    struct IllnessResult {
-        int duration;
-        State state;
-    };
-
-    struct SimulationResult {
-        double avg_ill_time;
-        double death_rate;
-    };
-
-    struct EpidemicResult {
-        int dead_count;
-        int immune_count;
-        int healthy_count;
-        int duration;
-    };
-
-    Simulator(int average_illness_length, double death_rate, int random_precision)
-    : generator(std::chrono::system_clock::now().time_since_epoch().count()), random_precision(random_precision) {
-        double continue_being_ill_probablility = double(average_illness_length - 1.) / average_illness_length;
-        double get_well_probability = (1. - continue_being_ill_probablility) * (1. - death_rate);
-
-        ill_cutoff = static_cast<int>(continue_being_ill_probablility * random_precision);
-        get_well_cutoff = static_cast<int>((continue_being_ill_probablility + get_well_probability) * random_precision);
+    static RandomGenerator& getInstance(int seed = 0) {
+        static RandomGenerator instance(seed);
+        return instance;
     }
 
-    IllnessResult SimulateIllness() {
-        int duration = 0;
-        State state = State::kIll;
-        while (state == State::kIll) {
-            ++duration;
-            state = ProgressIllness(state);
-        }
-        return {duration, state};
+    static void setSeed(int seed) {
+        auto &instance = getInstance();
+        instance.generator = std::mt19937(seed);
     }
 
-    SimulationResult SimulateIllnessBatch(int count) {
-        int death_count = 0;
-        int64_t total_duration = 0;
-        for (int i = 0; i < count; ++i) {
-            auto illness_result = SimulateIllness();
-            if (illness_result.state == State::kDead) {
-                ++death_count;
-            } else {
-                total_duration += illness_result.duration;
-            }
-        }
-
-        return {static_cast<double>(total_duration) / (count - death_count),
-                static_cast<double>(death_count) / count};
+    // generate random int in [from, to)
+    int uniformInt(int from, int to) {
+        // -1 is here because uniform_int_distribution generates from a to b inclusevly
+        return std::uniform_int_distribution<int>(from, to - 1)(generator);
     }
 
-    // TODO: simulate many
-    EpidemicResult SimulateEpidemic(const int population_size, const int initially_infected,
-                                    const double average_contact_per_person, const double infection_probability) {
-        assert(population_size >= initially_infected);
-        assert(average_contact_per_person <= population_size - 1);
-        std::vector<State> population(initially_infected, State::kIll);
-        population.resize(population_size, State::kHealthy);
+    int uniformIntWithExclusion(int from, int to, int exclusion) {
+        int omega = uniformInt(from, to - 1);
+        return omega == exclusion ? to - 1 : omega;
+    }
 
-        auto meetings_per_day = static_cast<int>(static_cast<double>(population_size) * average_contact_per_person);
-        int ill_count = initially_infected;
-        int dead_count = 0;
-        int immune_count = 0;
-        int days = 0;
-        while (ill_count > 0) {
-            ++days;
+    int uniformIntUpTo(int to) {
+        return uniformInt(0, to);
+    }
 
-            for (int i = 0; i < meetings_per_day; ++i) {
-                auto first_person_index = std::uniform_int_distribution<int>(0, population.size() - 2)(generator);
-                auto &first_person = population.at(first_person_index);
-                auto second_person_index = std::uniform_int_distribution<int>(first_person_index + 1, population_size - 1)(generator);
-                auto &second_person = population.at(second_person_index);
+    int uniformIntUpToWithExclusion(int to, int exclusion) {
+        return uniformIntWithExclusion(0, to, exclusion);
+    }
 
-                if (first_person == State::kIll && second_person == State::kHealthy) {
-                    if (RandomEvent(infection_probability)) {
-                        second_person = State::kInIncubationPeriod;
-                    }
-                } else if (second_person == State::kIll && first_person == State::kHealthy) {
-                    if (RandomEvent(infection_probability)) {
-                        first_person = State::kInIncubationPeriod;
-                    }
-                }
-            }
-            for (auto &person : population) {
-                auto person_before = person;
-                person = ProgressIllness(person);
-                if (person != person_before) {
-                    if (person == State::kIll) {
-                        ++ill_count;
-                    } else if (person_before == State::kIll) {
-                        --ill_count;
-                        if (person == State::kDead) {
-                            ++dead_count;
-                        } else if (person == State::kImmune) {
-                            ++immune_count;
-                        }
-                    }
-                }
+    int randomChoice(const std::vector<double> &probabilities) {
+        double cumulativeProbability = 0;
+        double omega = realDistribution(generator);
+        for (int i = 0; i < probabilities.size(); ++i) {
+            cumulativeProbability += probabilities.at(i);
+            if (omega < cumulativeProbability) {
+                return i;
             }
         }
+        return probabilities.size();
+    }
 
-        return {dead_count, immune_count, population_size - dead_count - immune_count, days};
+    bool randomEvent(double probability) {
+        return randomChoice({probability}) == 0;
     }
 
 private:
-    State ProgressIllness(State state) {
-        switch (state) {
-            case State::kInIncubationPeriod:
-                return State::kIll;
-            case State::kIll:
-                // TODO: check performance for static std::distribution
-                if (int random_token = RandomToken(); random_token < ill_cutoff) {
-                    return State::kIll;
-                } else if (random_token < get_well_cutoff) {
-                    return State::kImmune;
-                } else {
-                    return State::kDead;
-                }
-            default:
-                return state;
+    explicit RandomGenerator(int seed) : realDistribution(0., 1.0), generator(seed) {}
+
+    std::uniform_real_distribution<double> realDistribution;
+    std::mt19937 generator;
+};
+
+RandomGenerator &getRandomGenerator() {
+    return RandomGenerator::getInstance();
+}
+
+void seedRandomGenerator(int seed) {
+    RandomGenerator::setSeed(seed);
+}
+
+struct Disease {
+    Disease(double avgDuration, double deathRate, double transmissionProbablity = 0.)
+    : transmissionProbability(transmissionProbablity) {
+        dailyPersistenceProbability = double(avgDuration - 1.) / avgDuration;
+        dailyCureProbability = (1. - dailyPersistenceProbability) * (1. - deathRate);
+    }
+
+    double dailyPersistenceProbability;
+    double dailyCureProbability;
+    double transmissionProbability;
+
+    [[nodiscard]] double deathDailyProbability() const {
+        return 1 - dailyPersistenceProbability - dailyCureProbability;
+    }
+};
+
+enum class State {
+    kHealthy = 0,
+    kIll,
+    kImmune,
+    kDead
+};
+
+class Person {
+public:
+    Person(State state) : state_(state), disease_(nullptr) {}
+    Person(std::shared_ptr<Disease> disease) : state_(State::kIll), disease_(std::move(disease)) {}
+
+    void iterateState() {
+        if (disease_ == nullptr) {
+            return;
+        }
+        if (state_ == State::kHealthy) {
+            state_ = State::kIll;
+            return;
+        }
+        assert(state_ == State::kIll);
+        auto &randomGenerator = getRandomGenerator();
+        auto outcome = randomGenerator.randomChoice({disease_->dailyPersistenceProbability, disease_->dailyCureProbability});
+        if (outcome == 1) {
+            disease_ = nullptr;
+            state_ = State::kImmune;
+        } else if (outcome == 2) {
+            disease_ = nullptr;
+            state_ = State::kDead;
         }
     }
 
-    bool RandomEvent(const double probability) {
-        int random_token = RandomToken();
-        return random_token < random_precision * probability;
+    void meet(Person &other) {
+        tryTransmitTo(other);
+        other.tryTransmitTo(*this);
     }
 
-    int RandomToken() {
-        return std::uniform_int_distribution<int>(1, random_precision)(generator);
+    [[nodiscard]] State getState() const {
+        return state_;
     }
 
-    std::mt19937 generator;
-    int random_precision;
-    int ill_cutoff;
-    int get_well_cutoff;
+    bool noDisease() {
+        return disease_ == nullptr;
+    }
+
+private:
+    void tryTransmitTo(Person &other) {
+        if (state_ != State::kIll || other.state_ != State::kHealthy) {
+            return;
+        }
+        assert(disease_ != nullptr);
+        if (getRandomGenerator().randomEvent(disease_->transmissionProbability)) {
+            other.disease_ = disease_;
+        }
+    }
+
+    State state_;
+    std::shared_ptr<Disease> disease_;
 };
 
-void TestDeathRateAndDuration() {
-    // TODO: rewrite as a test
-    // TODO: add more tests
-    Simulator simulator(10, 0.3, 1e6);
-    auto simulation_result = simulator.SimulateIllnessBatch(1e6);
-    std::cout << OUTSTR(simulation_result.avg_ill_time) << " " << OUTSTR(simulation_result.death_rate) << std::endl;
+struct IllnessResult {
+    int duration;
+    State state;
+};
+
+IllnessResult simulateIllness(const Disease &disease) {
+    Person person(std::make_shared<Disease>(disease));
+    std::weak_ptr<Disease> diseaseWatcher;
+    int duration{};
+    while (person.getState() == State::kIll) {
+        ++duration;
+        person.iterateState();
+    }
+    return {duration, person.getState()};
+}
+
+struct IllnessBatchResult {
+    double avgDuration;
+    double deathRate;
+};
+
+IllnessBatchResult simulateIllnessBatch(const Disease &disease, int iterations) {
+    int64_t totalDuration = 0;
+    int deathCount = 0;
+
+    for (int i = 0; i < iterations; ++i) {
+        auto results = simulateIllness(disease);
+        totalDuration += results.duration;
+        deathCount += (results.state == State::kDead);
+    }
+    return {totalDuration / static_cast<double>(iterations), deathCount / static_cast<double>(iterations)};
+}
+
+struct EpidemicResult {
+    int deadCount;
+    int immuneCount;
+    int healthyCount;
+    int duration;
+
+    void print() {
+        std::cout << OUTSTR(deadCount) << " " << OUTSTR(immuneCount) << " "
+                  << OUTSTR(healthyCount) << " " << OUTSTR(duration) << std::endl;
+    }
+};
+
+EpidemicResult simulateEpidemic(const Disease &disease, int populationSize, int initiallyInfected,
+                                double avgContactsPerPerson, bool verbose = false) {
+    assert(populationSize >= initiallyInfected);
+    assert(initiallyInfected >= 0);
+    assert(avgContactsPerPerson <= populationSize - 1);
+    if (initiallyInfected == 0) {
+        return {0, 0, populationSize, 0};
+    }
+
+    auto patientZero = std::make_shared<Disease>(disease); // used only for initialization
+    std::vector<Person> population(initiallyInfected, patientZero);
+    population.resize(populationSize, State::kHealthy);
+    assert(population.back().noDisease());
+    std::weak_ptr<Disease> diseaseWatcher = patientZero;
+    patientZero = nullptr;
+
+    auto meetings_per_day = static_cast<int>(populationSize * avgContactsPerPerson);
+
+    int duration = 0;
+    while (!diseaseWatcher.expired()) {
+        ++duration;
+        for (int i = 0; i < meetings_per_day; ++i) {
+            int firstIndex = getRandomGenerator().uniformIntUpTo(population.size());
+            int secondIndex = getRandomGenerator().uniformIntUpToWithExclusion(population.size(), firstIndex);
+            population.at(firstIndex).meet(population.at(secondIndex));
+        }
+
+        int illCount{};
+        for (auto &person : population) {
+            person.iterateState();
+            illCount += person.getState() == State::kIll;
+        }
+        if (verbose) {
+            std::cout << "day " << duration << " ill: " << illCount << std::endl;
+        }
+    }
+
+    EpidemicResult results{};
+    results.duration = duration;
+    for (const auto &person : population) {
+        results.deadCount += person.getState() == State::kDead;
+        results.healthyCount += person.getState() == State::kHealthy;
+        results.immuneCount += person.getState() == State::kImmune;
+        assert(person.getState() != State::kIll);
+    }
+    return results;
+}
+
+bool near(double lhs, double rhs, double margin) {
+    return std::abs(lhs - rhs) < margin;
+}
+
+void testDiseaseModel() {
+    double avgDuration = 10.;
+    double deathRate = 0.1;
+    Disease disease(avgDuration, deathRate);
+    auto results = simulateIllnessBatch(disease, 1e5);
+    assert(near(avgDuration, results.avgDuration, 0.1));
+    assert(near(deathRate, results.deathRate, 0.1));
+}
+
+void testRandomEvents(double probability, double margin) {
+    double iterations = 1000000;
+    double events = 0;
+    for (int i = 0; i < iterations; ++i) {
+        if (getRandomGenerator().randomEvent(probability)) {
+            ++events;
+        }
+    }
+    assert(near(events / iterations, probability, margin));
+}
+
+void testZeroProbabilityEvent() {
+    testRandomEvents(0., 1e-15);
+}
+
+void testEvent() {
+    testRandomEvents(0.3, 1e-3);
+}
+
+template<typename Test>
+void runTest(Test test, const std::string &description) {
+    static int test_number = 1;
+    std::cout << "Test " << test_number++ << ": " << description;
+    test();
+    std::cout << " OK" << std::endl;
+}
+
+void runAllTests() {
+    seedRandomGenerator(0);
+    runTest(testDiseaseModel, "disease is correctly constructed via avg duration and death rate");
+    runTest(testZeroProbabilityEvent, "zero probability event never occurs");
+    runTest(testEvent, "test event has proper likelihood");
 }
 
 int main() {
-    auto begin = std::chrono::steady_clock::now();
-    srand(std::chrono::system_clock::now().time_since_epoch().count());
+//    runAllTests();
+    seedRandomGenerator(std::chrono::system_clock::now().time_since_epoch().count());
+    Disease disease(10, 0.02, 0.05);
+    auto results = simulateEpidemic(disease, 1e5, 100, 2., true);
+    results.print();
 
-    Simulator simulator(20, 0.03, 1e6);
-    auto epidemic_result = simulator.SimulateEpidemic(10000, 100, 3, 0.01);
-    std::cout << OUTSTR(epidemic_result.dead_count) << "\n" << OUTSTR(epidemic_result.immune_count) << "\n"
-              << OUTSTR(epidemic_result.healthy_count) << "\n" << OUTSTR(epidemic_result.duration) << std::endl;
-    auto end = std::chrono::steady_clock::now();
-    std::cout << std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count() << "ms" << std::endl;
     return 0;
 }
